@@ -2,7 +2,6 @@
 name = "whats-for-dinner"
 version = "0.1.0"
 description = ""
-authors = [{ name = "Your Name", email = "you@example.com" }]
 
 requires-python = ">=3.12"
 dependencies = [
@@ -29,15 +28,27 @@ where = ["src"]
 include = ["whats_for_dinner*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src"]
 
 [tool.pyright]
-include = ["src", "tests", "eval"]
+include = ["src", "eval"]
+# Investigated "strict": after fixing every legitimate issue it found in our own
+# code, 33 errors remained, and every one of them was either (a) "Stub file not
+# found" on a haystack-ai/haystack_integrations import - haystack-ai ships no
+# type stubs, and this fires in literally every file that touches the pipeline,
+# not a couple of isolated spots - or (b) inside the supplied, unused
+# custom_components.py bonus stub. There's no clean fix short of hand-writing a
+# stub package for a pinned third-party library, which is disproportionate for
+# a PoC. "basic" is the practical choice; see README "Design decisions".
 typeCheckingMode = "basic"
 
 [tool.ruff]
 line-length = 100
 src = ["src"]
+# ruff format also reformats fenced Python code blocks inside Markdown files.
+# CHALLENGE.md/CONVENTIONS.md are supplied and authoritative - not ours to
+# reformat - and PIPELINE.md/PROMPT.md are internal, gitignored build notes.
+extend-exclude = ["CHALLENGE.md", "CONVENTIONS.md", "PIPELINE.md", "PROMPT.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

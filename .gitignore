@@ -3,6 +3,7 @@
 .pytest_cache
 .venv
 .env
+.DS_Store
 scripts/
 
 # Generated per run (GPT-4o output isn't fully deterministic) - eval/dataset.jsonl
