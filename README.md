@@ -26,31 +26,38 @@ PostgreSQL/pgvector, and GPT-4o.
 ## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph ingestion[Startup ingestion]
-        A["data/recipes/*.txt"] --> B[Recipe loader]
-        B --> C["One Haystack Document per recipe"]
-        C --> D[OpenAI document embeddings]
-    end
-    D --> PG[("PostgreSQL / pgvector")]
+flowchart LR
 
-    subgraph request[Request]
-        E["POST /recommend_recipe"] --> F[FastAPI]
-        F --> G[RecommendationService]
-        G --> H[Query embedding]
-        H --> I[pgvector top-k retrieval]
-        I --> J[Prompt builder]
-        J --> K[GPT-4o]
-        K --> L[Structured RecommendationDecision]
-        L --> M[Semantic validation]
-        M --> N["Markdown + DecisionSummary"]
+    subgraph INDEX["Startup Indexing"]
+        R["Recipe Corpus<br/>20 text files"]
+        D["Haystack Documents<br/>1 per recipe"]
+        E1["OpenAI<br/>Document Embeddings"]
+        R --> D --> E1
     end
-    PG -.-> I
+
+    PG[("PostgreSQL<br/>+ pgvector")]
+
+    subgraph REQUEST["Recommendation Pipeline"]
+        U["Ingredients<br/>+ constraints"]
+        API["FastAPI<br/>POST /recommend_recipe"]
+        E2["OpenAI<br/>Query Embedding"]
+        RET["Vector Retrieval<br/>Top-K candidates"]
+        GPT["GPT-4o<br/>Feasibility & Selection"]
+        V["Structured Output<br/>+ semantic validation"]
+        RES["Recipe Markdown<br/>+ decision summary"]
+
+        U --> API --> E2 --> RET
+        RET --> GPT --> V --> RES
+    end
+
+    E1 --> PG
+    PG --> RET
 ```
 
-Retrieval is candidate generation, not the final decision - GPT-4o compares the retrieved
-candidates against the user's actual request and produces the structured decision above, which
-is then checked against those same candidates (semantic validation) before being returned.
+**Retrieval generates candidates; it does not make the recommendation.** GPT-4o evaluates
+ingredient coverage and user constraints across the retrieved candidates. The resulting
+structured decision is then validated by the application to ensure the selected recipe actually
+belongs to the retrieved candidate set.
 
 ### Project layout
 
