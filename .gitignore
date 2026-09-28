@@ -1,0 +1,43 @@
+.task
+.ruff_cache
+.pytest_cache
+.venv
+.env
+scripts/
+
+# Generated per run (GPT-4o output isn't fully deterministic) - eval/dataset.jsonl
+# is the tracked source fixture, this is just its latest output.
+eval/results.json
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Internal build-instruction docs - not part of the submission
+PROMPT.md
+PIPELINE.md
+
+# Redundant with data/recipes/ (already extracted); not read by the app
+data.zip
