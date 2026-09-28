@@ -21,7 +21,7 @@ PostgreSQL/pgvector, and GPT-4o.
 - [Tests](#tests)
 - [Evaluation strategy](#evaluation-strategy)
 - [Image input (bonus, not implemented)](#image-input-bonus-not-implemented)
-- [Future improvements](#future-improvements)
+- [Production evolution](#production-evolution)
 
 ## Architecture
 
@@ -359,13 +359,26 @@ that with any user text, and hand the combined text to the existing
 `RecommendationService.recommend(...)` unchanged. The request model would gain an optional image
 field; the route would run vision extraction first when present.
 
-## Future improvements
+## Production evolution
 
-- Structured ingredient extraction + hybrid ranking (semantic + ingredient-coverage score) once
-  the corpus is large enough to need it - at that scale, startup ingestion also becomes a
-  dedicated indexing job, and `filter_documents()`'s full-store fetch (fine at 20 rows) would
-  need to become a targeted lookup instead.
-- Grow the manually annotated evaluation set alongside prompt/model changes, and re-run it as a
-  regression check.
-- LLM-as-judge as a secondary, scalable signal for Markdown quality - kept secondary to manual
-  annotation, per PIPELINE.md.
+Nothing below is built - this is a PoC, deliberately. It documents how the existing,
+already-separated architecture could evolve if this went to production, not a plan to build it
+here.
+
+| Area | Current | At production scale |
+|---|---|---|
+| **Maintainability** | Small single-purpose modules, typed `Protocol` boundaries, Pydantic contracts, colocated unit tests, explicit structured LLM output | CI quality gates for `pytest`/`ruff`/`pyright`; integration/contract tests around PostgreSQL and the model boundaries; versioned prompt/model configuration; a growing regression evaluation fixture as real failures are discovered |
+| **Extensibility** | Retrieval, generation, and the API are already separate concerns, so extensions can slot in without replacing the business flow | Image ingredient extraction as an input adapter; alternative retrieval/reranking strategies; alternative model implementations behind the existing `Protocol` interfaces - none of this is implemented today |
+| **Scalability** | Startup ingestion, one document per recipe, pgvector top-k retrieval, full-store checks (fine at 20 rows) | Dedicated/offline ingestion job; batched embeddings; proper pgvector indexes; metadata/ingredient filtering; retrieve a wider candidate set and cheaply rerank it down before GPT-4o; horizontally scale the stateless API if traffic requires it - no Redis/Kafka/Kubernetes without a demonstrated need |
+
+**Observability and failure diagnosis.** Every successful request already logs (`service.py`):
+request ID, retrieved candidate IDs/titles/scores, the selected recipe, matched/missing
+ingredients, pantry assumptions, constraint conflicts, model identifiers, and latency. Failures
+log request ID, request length, error type, and latency. In production these same structured
+fields would feed centralized logs/traces and metrics - request/error rate and latency, retrieval
+latency/quality, LLM latency and token/cost usage, malformed or semantically invalid model
+responses, and recommendation-quality regressions over time. **Online observability answers "is
+the system healthy, and where did this request fail?"; offline evaluation (above) answers "is
+retrieval/recommendation quality still good?"** - deliberately different signals, not a
+substitute for one another. Logging request content in production would need an explicit
+privacy/retention policy first.
