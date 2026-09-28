@@ -1,0 +1,10 @@
+version: '3'
+services:
+  db:
+    image: ankane/pgvector
+    environment:
+      POSTGRES_DB: challenge
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline-pass
+    ports:
+      - "5432:5432"
