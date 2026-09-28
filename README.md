@@ -8,21 +8,6 @@ PostgreSQL/pgvector, and GPT-4o.
 > decision. GPT-4o compares the retrieved candidates against the user's actual ingredients and
 > constraints and produces an explainable, structured decision.
 
-## Contents
-
-- [Architecture](#architecture)
-- [Setup](#setup)
-- [Using the API](#using-the-api)
-- [How startup ingestion works](#how-startup-ingestion-works)
-- [The structured recommendation decision](#the-structured-recommendation-decision)
-- [Pantry-staple policy](#pantry-staple-policy)
-- [Design decisions & trade-offs](#design-decisions--trade-offs)
-- [Limitations](#limitations)
-- [Tests](#tests)
-- [Evaluation strategy](#evaluation-strategy)
-- [Image input (bonus, not implemented)](#image-input-bonus-not-implemented)
-- [Production evolution](#production-evolution)
-
 ## Architecture
 
 ```mermaid
@@ -73,10 +58,8 @@ eval/                                 manually annotated evaluation fixture + ru
 ```
 
 `data/recipes/` (the 20 supplied recipes) is what the app actually reads; `data.zip` is the
-original archive, unused.
-
-Flat inside `src/whats_for_dinner/` on purpose - the corpus and pipeline are small enough that
-sub-packages would add navigation overhead without benefit.
+original archive, unused. Flat inside `src/whats_for_dinner/` on purpose - the corpus and
+pipeline are small enough that sub-packages would add navigation overhead without benefit.
 
 ## Setup
 
@@ -94,9 +77,9 @@ docker compose up -d
 
 Starts the supplied `ankane/pgvector` image on `localhost:5432`. No other datastore is used.
 
-> No named volume is configured, so `docker compose down` also wipes the database (`stop`/`start`
-> preserves it). Not an issue in practice: ingestion is idempotent and cheap, so the app
-> self-heals - including recreating the `vector` extension - on next startup.
+> No named volume is configured, so `docker compose down` wipes the database (`stop`/`start`
+> preserves it). Not an issue in practice - ingestion is idempotent, so the app self-heals on
+> next startup.
 
 ### 2. Configure environment
 
@@ -120,9 +103,7 @@ cp .env.example .env   # then set OPENAI_API_KEY
 uv sync
 ```
 
-Creates `.venv`, installs pinned dependencies plus a `dev` group. `pgvector-haystack==3.4.1` was
-added explicitly - Haystack 2.12 has no Postgres integration built in (see
-[Design decisions](#design-decisions--trade-offs)).
+Creates `.venv` and installs the pinned dependencies plus a `dev` group.
 
 ### 4. Run the app
 
@@ -130,7 +111,7 @@ added explicitly - Haystack 2.12 has no Postgres integration built in (see
 uv run uvicorn whats_for_dinner.main:app --reload
 ```
 
-Ingests recipes on startup (see below), then serves at `http://127.0.0.1:8000`.
+Ingests recipes on startup, then serves at `http://127.0.0.1:8000`.
 
 ## Using the API
 
@@ -154,37 +135,31 @@ curl -s -X POST http://127.0.0.1:8000/recommend_recipe \
 }
 ```
 
-An explicit exclusion (e.g. "no cheese, I'm dairy-free") that every candidate conflicts with
-returns `is_reasonable_match: false` with the conflicting ingredient named, instead of silently
-picking a conflicting recipe or inventing one outside the corpus. Empty/whitespace-only `text`
-returns `422` before any retrieval or generation happens.
+- An explicit exclusion every candidate conflicts with (e.g. "no cheese, I'm dairy-free")
+  produces `is_reasonable_match: false` with the conflicting ingredient named.
+- Empty/whitespace-only `text` returns `422`.
+- The public response only exposes `recipe` (Markdown) and a `DecisionSummary`; internal
+  diagnostic fields (`selected_recipe_id`, `decision_reason`) are logged per request rather than
+  returned.
 
-The public response (`RecommendResponse`) only exposes `recipe` (Markdown) and a
-`DecisionSummary` (matched/missing ingredients, pantry assumptions, constraint conflicts,
-`is_reasonable_match`); the full internal decision (`selected_recipe_id`, `decision_reason`) is
-logged per request rather than returned, to keep the API contract simple.
+## Implementation notes
 
-## How startup ingestion works
+### Idempotent ingestion
 
-Each recipe file becomes one `Document`, with ID `sha256(filename + normalized_content)`:
+One recipe file becomes one `Document`, with a deterministic ID from `sha256(filename +
+normalized_content)`:
 
-- **Idempotent** - the same file produces the same ID every run, so `ingest_recipes` only embeds
-  documents not already in the store. Restarting makes zero embedding calls once indexed.
-- **Self-healing on edits** - changed content changes the ID; the old version (matched by
-  `meta.source`) is deleted so the store never accumulates stale duplicates.
+- Unchanged recipes are not re-embedded on restart.
+- Changed recipes replace their stale version instead of accumulating duplicates.
 
-Verified manually: two consecutive startups against the supplied 20 recipes ingest 20, then 0,
-with the pgvector row count unchanged.
+Verified manually: two consecutive startups against the supplied 20 recipes ingest 20, then 0.
 
-## The structured recommendation decision
+### Structured recommendation
 
-`OpenAIChatGenerator.run` in the pinned Haystack version (`2.12.0`) has no `response_format`
-parameter - that came in later releases. Structured output is requested the way the pinned
-`openai==1.75.0` client supports it directly: a strict JSON-schema `response_format` passed
-through `generation_kwargs`. The reply is parsed with
-`RecommendationDecision.model_validate_json`, so a malformed reply fails loudly as a
-`GenerationError` (verified directly against a live GPT-4o call before being wired in - see
-`generation.py`'s module docstring).
+GPT-4o returns strict, schema-constrained JSON, which Pydantic validates for shape. That alone
+doesn't guarantee grounding, so the application separately verifies `selected_recipe_id` belongs
+to the retrieved candidates, canonicalizes the title from that candidate rather than trusting the
+LLM's copy, and raises `GenerationError` if the id is invalid.
 
 ```python
 class RecommendationDecision(BaseModel):
@@ -199,186 +174,135 @@ class RecommendationDecision(BaseModel):
     markdown: str
 ```
 
-Structural validity (the schema above) doesn't guarantee semantic validity - the model could
-still select a recipe id that was never in the retrieved candidates. `service.py` checks this
-explicitly after generation and raises `GenerationError` if so, and canonicalizes
-`selected_recipe_title` from the matched candidate rather than trusting the LLM's own copy of
-it, so a valid-id/wrong-title reply behaves deterministically. As a similar safety net,
-`generation.py` strips any ingredient the model lists in *both* `missing_ingredients` and
-`assumed_pantry_staples` (observed once during manual testing).
+### Pantry policy
 
-Every request logs one structured record (`service.py`): request ID, retrieved candidate
-IDs/titles/scores, the full decision, model names, and latency - without ever logging the API
-key or database credentials.
-
-## Pantry-staple policy
-
-A small, explicit, easy-to-change list in `prompts.py`:
-
-```python
-PANTRY_STAPLES: list[str] = ["salt", "pepper", "water", "cooking oil"]
-```
-
-Common real-world names for "cooking oil" (vegetable, olive, canola) are listed explicitly in
-the prompt too, so the same staple is recognized deterministically regardless of which synonym a
-recipe uses - not left to the model's own judgment call. A recipe ingredient the user didn't
-mention is `assumed_pantry_staples` only if it matches one of these; everything else not
-mentioned is a genuine `missing_ingredient`.
+Allowed staples: salt, pepper, water, cooking oil (common variants - vegetable, olive, canola -
+map to the same staple). Everything else the user didn't mention is reported as a genuine
+missing ingredient, never silently assumed.
 
 ## Design decisions & trade-offs
 
 - **One document per recipe** - recipes are short cohesive units; chunking would separate
   ingredients from the instructions that use them.
-- **pgvector, no other vector store** - supplied by the challenge; a second datastore would be
-  unjustified for a 20-recipe PoC.
-- **`pgvector-haystack` as an added dependency** - Haystack 2.12 has no Postgres integration
-  built in. `3.4.1` is the newest release still declaring `haystack-ai>=2.11.0`; `6.x` requires
-  `>=2.22.0` and won't install alongside the pinned version.
-- **Semantic retrieval is candidate generation, not the final decision** (PIPELINE.md's central
-  principle) - no hard similarity threshold without evaluation evidence; `top_k` is the only lever.
-- **GPT-4o performs the final reasoning**, comparing literal user ingredients against each
-  candidate's real ingredient list - vector similarity alone can't tell feasibility.
-- **Semantic validation after generation** - structural (JSON-schema) validity doesn't guarantee
-  the selected id was actually retrieved; checked explicitly, with the title canonicalized from
-  the matched candidate rather than trusted from the LLM.
-- **Structured decision over free-form Markdown** - matched/missing/pantry fields are explicit,
-  not reverse-engineered from prose, so the system is debuggable and evaluable.
-- **Quantities stay natural language** - the full request is preserved and passed to GPT-4o
-  as-is; no unit/measurement normalization subsystem was built.
-- **Startup ingestion, not a separate job** - justified by the corpus size (20 recipes); a
-  dedicated indexing job is the scaling path (see Limitations/Future improvements).
-- **No repository-layer wrapping around `PgvectorDocumentStore`** - it already is the storage
-  abstraction. Where test isolation was needed, small `typing.Protocol` interfaces describe only
-  the one or two methods each module calls - zero-runtime-cost typing, not another layer.
-- **No SQLModel / custom tables** - `PgvectorDocumentStore` owns its own schema; SQLModel models
-  for a table this app never queries directly would be pure ceremony.
-- **Sync Haystack calls, async API boundary** - the pinned embedders have no `run_async`, so the
-  pipeline is sync internally; the one blocking call per request is offloaded with
-  `asyncio.to_thread` rather than forcing a partially-async pipeline.
-- **Manually annotated evaluation fixture**, not the evaluated model's own output, as ground truth.
+- **PostgreSQL/pgvector as the only vector store** - supplied by the challenge;
+  `pgvector-haystack` was added explicitly since Haystack 2.12 has no Postgres integration built in.
+- **Retrieval is candidate generation, not the final decision** - no hard similarity threshold
+  without evaluation evidence; `top_k` is the only retrieval lever.
+- **GPT-4o performs the contextual feasibility/selection**, comparing literal user ingredients
+  against each candidate's real ingredient list - vector similarity alone can't tell feasibility.
+- **Structured output + semantic validation** - the model's JSON is schema-validated, then
+  checked that the selected id was actually retrieved, so recommendations are well-formed *and*
+  grounded.
+- **Quantities remain natural language** - the full request is passed to GPT-4o as-is; no
+  unit/measurement normalization subsystem was built.
+- **Startup ingestion is appropriate for 20 recipes** - a dedicated indexing job is the scaling
+  path (see [Production evolution](#production-evolution)).
+- **Sync Haystack pipeline, async FastAPI boundary** - the pinned embedders have no `run_async`,
+  so the one blocking call per request is offloaded with `asyncio.to_thread`.
 
 ## Limitations
 
 - The 20-recipe corpus is tiny; retrieval quality here doesn't generalize to a larger, noisier
-  catalog - see [Evaluation strategy](#evaluation-strategy) for what would need to grow with it.
-- Ingredient interpretation during recommendation is handled by GPT-4o, not a deterministic
-  matcher - there's no ingredient-normalization or ontology layer, so whether "veggies" counts
-  as "mixed vegetables" is the model's judgment call. Evaluation, separately, compares the
-  model's reported ingredient lists against manually annotated labels using case-insensitive
-  set matching - that comparison is deterministic even though the recommendation itself isn't.
-- `missing_ingredients` recall isn't perfect (~0.5-0.6, see Evaluation strategy) - the model
-  sometimes under-reports an ingredient it considers minor (e.g. cheese folded into a sauce).
-- **Recipe selection is not fully deterministic** - see
-  [Evaluation strategy](#evaluation-strategy) for a concrete example. A single passing run or
-  manual test is not sufficient evidence of correctness.
-- `custom_components.py` (the supplied image-extraction helper) has pre-existing `pyright`
-  errors from the challenge's own reference code; unused, unmodified.
-- No auth, rate limiting, or production observability - out of scope for a PoC.
+  catalog.
+- Ingredient interpretation is GPT-4o's semantic judgment, not a deterministic matcher - there's
+  no normalization/ontology layer. Evaluation separately uses case-insensitive set matching
+  against manually annotated labels.
+- `missing_ingredients` recall is imperfect (~0.6) - the model sometimes under-reports an
+  ingredient it considers minor.
+- Recommendation generation is not fully deterministic - see
+  [Evaluation strategy](#evaluation-strategy) for a concrete example.
+- No auth, rate limiting, or centralized observability - intentionally out of scope for a PoC
+  (see [Production evolution](#production-evolution)).
 
 ## Tests
 
 ```bash
-uv run pytest       # 30 tests, all OpenAI/DB calls replaced with small fakes, <1s
+uv run pytest
 uv run ruff check .
 uv run pyright
 ```
 
-Colocated as `<module>_test.py` next to the module they test (`recipes_test.py`,
-`ingestion_test.py`, `generation_test.py`, `service_test.py`, `main_test.py`), per
-CONVENTIONS.md. Coverage: recipe loading/deterministic IDs, ingestion idempotency, structured
-generation parsing + schema request + error mapping, service orchestration + semantic validation
-(hallucinated-id rejection, title canonicalization), and the public API contract including 502s
-that don't leak the underlying exception text. `eval/run_eval_test.py` covers the evaluator's own
-logic the same way - it exercises `validate_selection` (imported from `service.py`, not
-duplicated) with fakes, so evaluation is checked against the identical semantic-validation
-invariant production enforces.
+30 tests, with all external OpenAI/DB interactions replaced by fakes. Coverage spans
+ingestion/idempotency, generation/semantic validation, API/error handling, and the evaluation
+logic itself; tests are colocated as `<module>_test.py`, per CONVENTIONS.md.
 
-`pyright`'s `typeCheckingMode` is `"basic"`, not `"strict"` - tried deliberately: after fixing
-every legitimate issue strict mode found, 33 errors remained, all either `haystack-ai` having no
-type stubs at all (fires in every file that imports it) or inside the unused
-`custom_components.py` stub. See the comment in `pyproject.toml` for the full reasoning.
+Pyright uses basic mode because the pinned Haystack dependencies lack complete type information;
+strict mode was evaluated rather than made green through broad suppressions.
 
 ## Evaluation strategy
 
-Retrieval and generation are evaluated independently, against a small **manually annotated**
-fixture (`eval/dataset.jsonl`, 10 queries) - annotated and reviewed by the developer of this
-project, not an independent multi-annotator study. Never evaluated against the model's own
-output as ground truth. Run it (costs real OpenAI calls, run sparingly):
+A manually annotated 10-query fixture evaluates retrieval and recommendation separately, never
+against the model's own output as ground truth.
+
+| Stage | Metrics |
+|---|---|
+| Retrieval | Recall@K, Precision@K, Hit Rate@K, MRR |
+| Decision | Selection accuracy, reasonable-match accuracy |
+| Accounting | Constraint, matched-ingredient and missing-ingredient precision/recall |
 
 ```bash
 uv run python eval/run_eval.py
 ```
 
-Each run prints the report and overwrites `eval/results.json` (not committed - GPT-4o's output
-isn't fully deterministic) with the same numbers as structured data, so one run can be compared
-against a later one after a prompt/model change.
+Current real results:
 
-**Retrieval metrics**: Recall@K, Precision@K, Hit rate@K, MRR - "did retrieval hand generation
-the right recipe at all?" **Generation metrics**: selection accuracy, `is_reasonable_match`
-accuracy, constraint-conflict precision/recall (the actual conflicting items, not just whether
-*some* conflict was reported), and matched/missing ingredient precision/recall.
-
-**Failure taxonomy** per query, in priority order: `retrieval failure` -> `selection failure`
--> `constraint failure` -> `ingredient-accounting failure` -> `pass` - lets an engineer localize
-*which stage* regressed instead of reading one aggregate score.
-
-### Actual run (live GPT-4o + the supplied corpus)
-
-```
-Recall@5 1.00  Precision@5 0.24  Hit rate@5 1.00  MRR 1.00
-Selection accuracy 1.00  is_reasonable_match accuracy 1.00
-Constraint conflicts P/R 0.90/0.90   Matched P/R 0.92/0.92   Missing P/R 0.62/0.67
+```text
+Retrieval    Recall@5 1.00 | Precision@5 0.24 | Hit@5 1.00 | MRR 1.00
+Selection    Accuracy 1.00 | Reasonable-match 1.00
+Constraints  P/R 0.90/0.90
+Matched      P/R 0.92/0.92
+Missing      P/R 0.62/0.67
 ```
 
-Retrieval was perfect on this fixture (expected - 20 well-separated recipes, top_k=5; not
-evidence of production-scale quality given the corpus/fixture size). 8 of 10 queries passed
-outright. The one constraint-conflict "failure" is a useful finding about the *metric*, not the
-system: for the no-cheese Caprese Chicken query, GPT-4o correctly rejected the recipe
-(`is_reasonable_match: false`) but phrased the conflict as `"contains cheese"` rather than the
-annotated `"cheese"` - exact-set string matching scores that as wrong even though the underlying
-decision was right. The other two failures are the already-known `missing_ingredients` recall
-weakness (the model under-reporting an ingredient it considers minor).
+**Key findings:**
 
-**Historical finding, kept because it's hard to reproduce on demand:** an earlier pair of
-consecutive runs (before the constraint-conflict precision/recall metric above existed) showed
-GPT-4o's *recipe selection itself* changing between identical runs - selection accuracy moved
-from 1.00 to 0.80, including one run where **Stuffed Bell Peppers** (no chicken, contains the
-excluded cheese) was picked over the clearly better **Caprese Chicken** for that same query. That
-remains the core limitation this evaluation setup exists to catch: **GPT-4o's output is not fully
-deterministic**, a single run (this one included) is not sufficient evidence of quality, and a
-larger fixture run multiple times per change would be needed before trusting a metric movement as
-real.
+- Expected recipe was retrieved for every query in this small fixture.
+- 8/10 queries passed all current checks.
+- Missing-ingredient recall remains the weakest measured behavior.
+- `"cheese"` vs `"contains cheese"` exposes a limitation of exact-set evaluation rather than a
+  recommendation failure.
+- Earlier repeated runs showed selection accuracy varying from 1.00 to 0.80, demonstrating
+  GPT-4o nondeterminism and why retrieval and generation are evaluated separately.
+
+These results cover 10 queries against 20 recipes and are not evidence of production-scale
+retrieval quality.
+
+Failure taxonomy: `retrieval → selection → constraint → ingredient-accounting → pass`
 
 ## Image input (bonus, not implemented)
 
-Not implemented - time went into ingestion robustness, semantic validation, tests, and the
-evaluation fixture instead. If added (PIPELINE.md section 25), it's a pure input adapter, not a
-second architecture: extend `custom_components.py`'s `ExtractFoodItemsFromImage` to extract
-ingredients from an image (preserving uncertainty rather than inventing unseen ones), concatenate
-that with any user text, and hand the combined text to the existing
-`RecommendationService.recommend(...)` unchanged. The request model would gain an optional image
-field; the route would run vision extraction first when present.
+Not implemented; time was prioritized toward ingestion robustness, validation, tests, and
+evaluation. Image support would be an input adapter: image → GPT-4o vision ingredient extraction
+→ existing recommendation pipeline.
 
 ## Production evolution
 
-Nothing below is built - this is a PoC, deliberately. It documents how the existing,
-already-separated architecture could evolve if this went to production, not a plan to build it
-here.
+Nothing below is built - this documents how the existing, already-separated architecture could
+evolve in production.
 
 | Area | Current | At production scale |
 |---|---|---|
-| **Maintainability** | Small single-purpose modules, typed `Protocol` boundaries, Pydantic contracts, colocated unit tests, explicit structured LLM output | CI quality gates for `pytest`/`ruff`/`pyright`; integration/contract tests around PostgreSQL and the model boundaries; versioned prompt/model configuration; a growing regression evaluation fixture as real failures are discovered |
-| **Extensibility** | Retrieval, generation, and the API are already separate concerns, so extensions can slot in without replacing the business flow | Image ingredient extraction as an input adapter; alternative retrieval/reranking strategies; alternative model implementations behind the existing `Protocol` interfaces - none of this is implemented today |
-| **Scalability** | Startup ingestion, one document per recipe, pgvector top-k retrieval, full-store checks (fine at 20 rows) | Dedicated/offline ingestion job; batched embeddings; proper pgvector indexes; metadata/ingredient filtering; retrieve a wider candidate set and cheaply rerank it down before GPT-4o; horizontally scale the stateless API if traffic requires it - no Redis/Kafka/Kubernetes without a demonstrated need |
+| **Maintainability** | Small single-purpose modules, typed `Protocol` boundaries, Pydantic contracts, colocated tests, structured LLM output | CI quality gates; integration tests around Postgres/model boundaries; versioned prompt/model config; a growing regression fixture |
+| **Extensibility** | Retrieval, generation, and the API are already separate concerns | Image ingredient extraction as an input adapter; alternative retrieval/reranking; alternative models behind the existing `Protocol` interfaces |
+| **Scalability** | Startup ingestion, one document per recipe, pgvector top-k retrieval, full-store checks (fine at 20 rows) | Offline ingestion job; batched embeddings; proper pgvector indexes; metadata filtering; wider candidate set + cheap rerank before GPT-4o; horizontal API scaling |
 
-**Observability and failure diagnosis.** Every successful request already logs (`service.py`):
-request ID, retrieved candidate IDs/titles/scores, the selected recipe, matched/missing
-ingredients, pantry assumptions, constraint conflicts, model identifiers, and latency. Failures
-log request ID, request length, error type, and latency. In production these same structured
-fields would feed centralized logs/traces and metrics - request/error rate and latency, retrieval
-latency/quality, LLM latency and token/cost usage, malformed or semantically invalid model
-responses, and recommendation-quality regressions over time. **Online observability answers "is
-the system healthy, and where did this request fail?"; offline evaluation (above) answers "is
-retrieval/recommendation quality still good?"** - deliberately different signals, not a
-substitute for one another. Logging request content in production would need an explicit
-privacy/retention policy first.
+### Observability
+
+Already logged:
+- request ID and latency
+- retrieved candidates and scores
+- selected recipe and decision
+- matched/missing ingredients and constraint conflicts
+- model identifiers
+- failure type on errors
+
+At production scale, expose:
+- **System:** throughput, error rate, p50/p95/p99 latency
+- **Retrieval:** retrieval latency and candidate-quality trends
+- **LLM:** generation latency, token/cost usage, invalid responses
+- **Quality:** recommendation regressions against the evaluation fixture
+
+**Online observability:** Is the system healthy, and where did this request fail?
+**Offline evaluation:** Is retrieval/recommendation quality still good?
+
+Request-content logging in production would need an explicit privacy/retention policy.
