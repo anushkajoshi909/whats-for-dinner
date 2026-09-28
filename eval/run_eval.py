@@ -44,7 +44,7 @@ class EvalRecord(BaseModel):
     preferred_recipe_id: str | None
     expected_matched_ingredients: list[str]
     expected_missing_ingredients: list[str]
-    expected_constraint_conflict: bool
+    expected_constraint_conflicts: list[str]
     expected_is_reasonable_match: bool
 
 
@@ -77,7 +77,8 @@ class GenerationMetrics(BaseModel):
 
     selection_accuracy: float
     is_reasonable_match_accuracy: float
-    constraint_adherence: float
+    constraint_conflicts_precision: float
+    constraint_conflicts_recall: float
     matched_ingredients_precision: float
     matched_ingredients_recall: float
     missing_ingredients_precision: float
@@ -141,7 +142,10 @@ def _classify_failure(
         return "selection failure"
     if preferred_doc_id is not None and decision.selected_recipe_id != preferred_doc_id:
         return "selection failure"
-    if record.expected_constraint_conflict != bool(decision.constraint_conflicts):
+    constraint_precision, constraint_recall = _ingredient_prf(
+        record.expected_constraint_conflicts, decision.constraint_conflicts
+    )
+    if constraint_precision < 1.0 or constraint_recall < 1.0:
         return "constraint failure"
     _, matched_recall = _ingredient_prf(
         record.expected_matched_ingredients, decision.matched_ingredients
@@ -176,7 +180,10 @@ def _evaluate_one(
 def _compute_retrieval_metrics(
     results: list[QueryResult], id_map: dict[str, str], top_k: int
 ) -> RetrievalMetrics:
-    recalls, precisions, hits, reciprocal_ranks = [], [], [], []
+    recalls: list[float] = []
+    precisions: list[float] = []
+    hits: list[float] = []
+    reciprocal_ranks: list[float] = []
     for result in results:
         relevant_doc_ids = {id_map[short_id] for short_id in result.record.relevant_recipe_ids}
         if not relevant_doc_ids:
@@ -203,8 +210,14 @@ def _compute_retrieval_metrics(
 def _compute_generation_metrics(
     results: list[QueryResult], id_map: dict[str, str]
 ) -> GenerationMetrics:
-    selection_correct, reasonable_match_correct, constraint_correct = [], [], []
-    matched_precisions, matched_recalls, missing_precisions, missing_recalls = [], [], [], []
+    selection_correct: list[float] = []
+    reasonable_match_correct: list[float] = []
+    constraint_precisions: list[float] = []
+    constraint_recalls: list[float] = []
+    matched_precisions: list[float] = []
+    matched_recalls: list[float] = []
+    missing_precisions: list[float] = []
+    missing_recalls: list[float] = []
 
     for result in results:
         record, decision = result.record, result.decision
@@ -219,11 +232,14 @@ def _compute_generation_metrics(
         reasonable_match_correct.append(
             1.0 if decision.is_reasonable_match == record.expected_is_reasonable_match else 0.0
         )
-        constraint_correct.append(
-            1.0
-            if bool(decision.constraint_conflicts) == record.expected_constraint_conflict
-            else 0.0
+        # Precision/recall over the actual conflicting items, not just whether *some*
+        # conflict was reported - a set comparison catches both a missed conflict and
+        # a hallucinated one, where a bool comparison would only catch the former.
+        cp, cr = _ingredient_prf(
+            record.expected_constraint_conflicts, decision.constraint_conflicts
         )
+        constraint_precisions.append(cp)
+        constraint_recalls.append(cr)
         mp, mr = _ingredient_prf(record.expected_matched_ingredients, decision.matched_ingredients)
         xp, xr = _ingredient_prf(record.expected_missing_ingredients, decision.missing_ingredients)
         matched_precisions.append(mp)
@@ -234,7 +250,8 @@ def _compute_generation_metrics(
     return GenerationMetrics(
         selection_accuracy=statistics.mean(selection_correct),
         is_reasonable_match_accuracy=statistics.mean(reasonable_match_correct),
-        constraint_adherence=statistics.mean(constraint_correct),
+        constraint_conflicts_precision=statistics.mean(constraint_precisions),
+        constraint_conflicts_recall=statistics.mean(constraint_recalls),
         matched_ingredients_precision=statistics.mean(matched_precisions),
         matched_ingredients_recall=statistics.mean(matched_recalls),
         missing_ingredients_precision=statistics.mean(missing_precisions),
@@ -269,7 +286,8 @@ def _print_report(report: EvalReport) -> None:
     print("\n--- Generation / decision metrics ---")
     print(f"Selection accuracy:           {g.selection_accuracy:.2f}")
     print(f"is_reasonable_match accuracy: {g.is_reasonable_match_accuracy:.2f}")
-    print(f"Constraint adherence:         {g.constraint_adherence:.2f}")
+    constraint_p, constraint_r = g.constraint_conflicts_precision, g.constraint_conflicts_recall
+    print(f"Constraint conflicts P/R:     {constraint_p:.2f} / {constraint_r:.2f}")
     matched_p, matched_r = g.matched_ingredients_precision, g.matched_ingredients_recall
     missing_p, missing_r = g.missing_ingredients_precision, g.missing_ingredients_recall
     print(f"Matched ingredients  P/R:     {matched_p:.2f} / {matched_r:.2f}")
