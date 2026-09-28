@@ -6,7 +6,7 @@ from haystack.dataclasses import ChatMessage
 from whats_for_dinner.errors import GenerationError
 from whats_for_dinner.generation import generate_recommendation
 
-_VALID_DECISION = {
+VALID_DECISION = {
     "selected_recipe_id": "01",
     "selected_recipe_title": "Quick Chicken Stir-Fry",
     "matched_ingredients": ["chicken", "soy sauce"],
@@ -38,7 +38,7 @@ class FakeChatGenerator:
 
 
 def test_generate_recommendation_parses_a_valid_reply() -> None:
-    generator = FakeChatGenerator(reply_text=json.dumps(_VALID_DECISION))
+    generator = FakeChatGenerator(reply_text=json.dumps(VALID_DECISION))
 
     decision = generate_recommendation(generator, messages=[ChatMessage.from_user("hi")])
 
@@ -48,7 +48,7 @@ def test_generate_recommendation_parses_a_valid_reply() -> None:
 
 
 def test_generate_recommendation_requests_strict_json_schema() -> None:
-    generator = FakeChatGenerator(reply_text=json.dumps(_VALID_DECISION))
+    generator = FakeChatGenerator(reply_text=json.dumps(VALID_DECISION))
 
     generate_recommendation(generator, messages=[ChatMessage.from_user("hi")])
 
@@ -69,7 +69,7 @@ def test_generate_recommendation_raises_on_malformed_json() -> None:
 
 
 def test_generate_recommendation_raises_when_required_field_missing() -> None:
-    incomplete = {k: v for k, v in _VALID_DECISION.items() if k != "decision_reason"}
+    incomplete = {k: v for k, v in VALID_DECISION.items() if k != "decision_reason"}
 
     generator = FakeChatGenerator(reply_text=json.dumps(incomplete))
 
@@ -86,7 +86,7 @@ def test_generate_recommendation_wraps_api_failures() -> None:
 
 def test_generate_recommendation_deduplicates_pantry_staples_from_missing() -> None:
     decision_with_overlap = {
-        **_VALID_DECISION,
+        **VALID_DECISION,
         "missing_ingredients": ["garlic", "cooking oil"],
         "assumed_pantry_staples": ["cooking oil"],
     }

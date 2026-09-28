@@ -3,8 +3,8 @@ import json
 import pytest
 from haystack import Document
 
-from tests.test_generation import _VALID_DECISION, FakeChatGenerator
 from whats_for_dinner.errors import GenerationError, RetrievalError
+from whats_for_dinner.generation_test import VALID_DECISION, FakeChatGenerator
 from whats_for_dinner.service import RecommendationService
 
 
@@ -46,7 +46,7 @@ def _build_service(
         chat_generator=FakeChatGenerator(
             reply_text=generator_reply
             if generator_reply is not None
-            else json.dumps(_VALID_DECISION),
+            else json.dumps(VALID_DECISION),
             error=generator_error,
         ),
         chat_model="gpt-4o",
@@ -59,10 +59,10 @@ def test_recommend_returns_markdown_and_decision_summary() -> None:
 
     response = service.recommend("I have chicken and soy sauce")
 
-    assert response.recipe == _VALID_DECISION["markdown"]
-    assert response.decision.selected_recipe == _VALID_DECISION["selected_recipe_title"]
-    assert response.decision.matched_ingredients == _VALID_DECISION["matched_ingredients"]
-    assert response.decision.missing_ingredients == _VALID_DECISION["missing_ingredients"]
+    assert response.recipe == VALID_DECISION["markdown"]
+    assert response.decision.selected_recipe == VALID_DECISION["selected_recipe_title"]
+    assert response.decision.matched_ingredients == VALID_DECISION["matched_ingredients"]
+    assert response.decision.missing_ingredients == VALID_DECISION["missing_ingredients"]
     assert response.decision.is_reasonable_match is True
 
 
@@ -85,3 +85,24 @@ def test_recommend_raises_generation_error_on_api_failure() -> None:
 
     with pytest.raises(GenerationError):
         service.recommend("I have chicken")
+
+
+def test_recommend_canonicalizes_title_from_matched_candidate() -> None:
+    # The candidate's real title differs from whatever text the LLM echoed back as
+    # selected_recipe_title - the response must reflect the candidate, not the LLM's copy.
+    candidate = Document(
+        id="01", content="chicken stir fry recipe", meta={"title": "Real Canonical Title"}
+    )
+    service = _build_service(documents=[candidate])
+
+    response = service.recommend("I have chicken and soy sauce")
+
+    assert response.decision.selected_recipe == "Real Canonical Title"
+
+
+def test_recommend_raises_generation_error_on_hallucinated_recipe_id() -> None:
+    hallucinated = {**VALID_DECISION, "selected_recipe_id": "99"}
+    service = _build_service(generator_reply=json.dumps(hallucinated))
+
+    with pytest.raises(GenerationError):
+        service.recommend("I have chicken and soy sauce")
