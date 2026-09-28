@@ -9,12 +9,42 @@ import logging
 import time
 import uuid
 
+from whats_for_dinner.errors import GenerationError
 from whats_for_dinner.generation import ChatGenerator, generate_recommendation
-from whats_for_dinner.models import DecisionSummary, RecommendationTrace, RecommendResponse
+from whats_for_dinner.models import (
+    DecisionSummary,
+    RecommendationDecision,
+    RecommendationTrace,
+    RecommendResponse,
+    RetrievedCandidate,
+)
 from whats_for_dinner.prompts import build_recommendation_messages
 from whats_for_dinner.retrieval import CandidateRetriever, TextEmbedder, retrieve_candidates
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_selection(
+    candidates: list[RetrievedCandidate], decision: RecommendationDecision
+) -> RecommendationDecision:
+    """Reject a decision that points at a recipe retrieval never supplied.
+
+    Structural validity (generation.py's JSON-schema + Pydantic check) only
+    guarantees the shape of the reply, not that selected_recipe_id refers to
+    a real candidate - the model can still hallucinate an id. Canonicalizing
+    the title from the matched candidate, rather than trusting the LLM's own
+    copy of it, also makes a valid-id/wrong-title reply behave
+    deterministically instead of silently displaying whatever text GPT-4o
+    happened to write.
+    """
+    candidates_by_id = {candidate.recipe_id: candidate for candidate in candidates}
+    matched_candidate = candidates_by_id.get(decision.selected_recipe_id)
+    if matched_candidate is None:
+        raise GenerationError(
+            f"GPT-4o selected recipe id {decision.selected_recipe_id!r}, "
+            "which was not among the retrieved candidates"
+        )
+    return decision.model_copy(update={"selected_recipe_title": matched_candidate.title})
 
 
 class RecommendationService:
@@ -45,7 +75,8 @@ class RecommendationService:
 
         Raises:
             RetrievalError: query embedding or pgvector retrieval failed.
-            GenerationError: the GPT-4o call failed or its reply was malformed.
+            GenerationError: the GPT-4o call failed, its reply was malformed, or it
+                selected a recipe id that wasn't one of the retrieved candidates.
         """
         request_id = str(uuid.uuid4())
         started_at = time.perf_counter()
@@ -53,7 +84,9 @@ class RecommendationService:
         try:
             candidates = retrieve_candidates(self._text_embedder, self._retriever, request_text)
             messages = build_recommendation_messages(request_text, candidates)
-            decision = generate_recommendation(self._chat_generator, messages)
+            decision = _validate_selection(
+                candidates, generate_recommendation(self._chat_generator, messages)
+            )
         except Exception as exc:
             # Catches RetrievalError/GenerationError (the expected failure modes -
             # see Raises below) as well as any genuinely unexpected bug in this
