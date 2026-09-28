@@ -1,0 +1,92 @@
+"""FastAPI application: component wiring, startup ingestion, and the thin API route.
+
+All Haystack/OpenAI components are blocking (this pinned Haystack version has
+no async document store or embedder - see README "Design decisions"), so the
+one request-path call is offloaded with asyncio.to_thread instead of forcing
+a partially-async pipeline for no real benefit.
+"""
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from haystack.components.embedders import OpenAIDocumentEmbedder, OpenAITextEmbedder
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.utils import Secret
+from haystack_integrations.components.retrievers.pgvector import PgvectorEmbeddingRetriever
+from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
+
+from whats_for_dinner.config import get_settings
+from whats_for_dinner.errors import GenerationError, RetrievalError
+from whats_for_dinner.ingestion import ingest_recipes
+from whats_for_dinner.models import RecommendRequest, RecommendResponse
+from whats_for_dinner.service import RecommendationService
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    openai_api_key = Secret.from_token(settings.openai_api_key)
+
+    document_store = PgvectorDocumentStore(
+        connection_string=Secret.from_token(settings.database_url),
+        table_name="recipes",
+        embedding_dimension=settings.embedding_dimension,
+    )
+    document_embedder = OpenAIDocumentEmbedder(
+        api_key=openai_api_key, model=settings.openai_embedding_model
+    )
+
+    ingested_count = await asyncio.to_thread(
+        ingest_recipes, document_store, document_embedder, settings.recipe_data_path
+    )
+    logger.info("Startup ingestion complete: %d new recipe(s) embedded", ingested_count)
+
+    text_embedder = OpenAITextEmbedder(
+        api_key=openai_api_key, model=settings.openai_embedding_model
+    )
+    retriever = PgvectorEmbeddingRetriever(
+        document_store=document_store, top_k=settings.retrieval_top_k
+    )
+    chat_generator = OpenAIChatGenerator(api_key=openai_api_key, model=settings.openai_chat_model)
+
+    app.state.recommendation_service = RecommendationService(
+        text_embedder=text_embedder,
+        retriever=retriever,
+        chat_generator=chat_generator,
+        chat_model=settings.openai_chat_model,
+        embedding_model=settings.openai_embedding_model,
+    )
+    yield
+
+
+app = FastAPI(title="What's for Dinner", lifespan=lifespan)
+
+
+@app.exception_handler(RetrievalError)
+async def retrieval_error_handler(_request, exc: RetrievalError) -> JSONResponse:
+    logger.error("Retrieval error: %s", exc)
+    return JSONResponse(
+        status_code=502, content={"detail": "Recipe retrieval is temporarily unavailable."}
+    )
+
+
+@app.exception_handler(GenerationError)
+async def generation_error_handler(_request, exc: GenerationError) -> JSONResponse:
+    logger.error("Generation error: %s", exc)
+    return JSONResponse(
+        status_code=502, content={"detail": "Recipe recommendation is temporarily unavailable."}
+    )
+
+
+@app.post("/recommend_recipe")
+async def recommend_recipe(request: RecommendRequest) -> RecommendResponse:
+    """Recommend one recipe from the corpus for the given free-text ingredient request."""
+    service: RecommendationService = app.state.recommendation_service
+    return await asyncio.to_thread(service.recommend, request.text)
