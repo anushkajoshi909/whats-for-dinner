@@ -57,9 +57,9 @@ src/whats_for_dinner/
 eval/                                 manually annotated evaluation fixture + runner
 ```
 
-`data/recipes/` (the 20 supplied recipes) is what the app actually reads; `data.zip` is the
-original archive, unused. Flat inside `src/whats_for_dinner/` on purpose - the corpus and
-pipeline are small enough that sub-packages would add navigation overhead without benefit.
+`data/recipes/` (the 20 supplied recipes) is what the app actually reads. Flat inside
+`src/whats_for_dinner/` on purpose - the corpus and pipeline are small enough that sub-packages
+would add navigation overhead without benefit.
 
 ## Setup
 
@@ -157,9 +157,11 @@ Verified manually: two consecutive startups against the supplied 20 recipes inge
 ### Structured recommendation
 
 GPT-4o returns strict, schema-constrained JSON, which Pydantic validates for shape. That alone
-doesn't guarantee grounding, so the application separately verifies `selected_recipe_id` belongs
-to the retrieved candidates, canonicalizes the title from that candidate rather than trusting the
-LLM's copy, and raises `GenerationError` if the id is invalid.
+doesn't guarantee grounding, so the application applies three additional semantic safeguards:
+
+- The selected id must be among the retrieved candidates.
+- The title is canonicalized from the retrieved candidate, not trusted from the LLM's own copy.
+- Invalid structured or semantic output raises `GenerationError`.
 
 ```python
 class RecommendationDecision(BaseModel):
@@ -176,9 +178,9 @@ class RecommendationDecision(BaseModel):
 
 ### Pantry policy
 
-Allowed staples: salt, pepper, water, cooking oil (common variants - vegetable, olive, canola -
-map to the same staple). Everything else the user didn't mention is reported as a genuine
-missing ingredient, never silently assumed.
+Allowed staples: salt, pepper, water, cooking oil. The prompt explicitly treats vegetable, olive,
+and canola oil as cooking-oil variants. Everything else the user didn't mention is reported as a
+genuine missing ingredient, never silently assumed.
 
 ## Design decisions & trade-offs
 
@@ -267,8 +269,6 @@ Missing      P/R 0.62/0.67
 These results cover 10 queries against 20 recipes and are not evidence of production-scale
 retrieval quality.
 
-Failure taxonomy: `retrieval → selection → constraint → ingredient-accounting → pass`
-
 ## Image input (bonus, not implemented)
 
 Not implemented; time was prioritized toward ingestion robustness, validation, tests, and
@@ -303,6 +303,7 @@ At production scale, expose:
 - **Quality:** recommendation regressions against the evaluation fixture
 
 **Online observability:** Is the system healthy, and where did this request fail?
+
 **Offline evaluation:** Is retrieval/recommendation quality still good?
 
 Request-content logging in production would need an explicit privacy/retention policy.
