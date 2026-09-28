@@ -1,7 +1,7 @@
 """Evaluation runner: retrieval + generation metrics against dataset.jsonl.
 
 This is a small script, not a platform (PIPELINE.md section 22): it runs the real
-pipeline (real DB, real OpenAI calls) against a human-annotated query set and
+pipeline (real DB, real OpenAI calls) against a manually annotated query set and
 prints retrieval metrics separately from generation metrics, plus a
 per-query failure-stage classification. Run it explicitly and sparingly -
 every row makes at least one embedding call and one GPT-4o call.
@@ -38,7 +38,7 @@ _RESULTS_PATH = Path(__file__).parent / "results.json"
 
 
 class EvalRecord(BaseModel):
-    """One human-annotated row. Pydantic validates the fixture on load,
+    """One manually annotated row. Pydantic validates the fixture on load,
     catching a malformed dataset row before it reaches the live pipeline."""
 
     query: str
