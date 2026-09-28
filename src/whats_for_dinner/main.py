@@ -8,10 +8,10 @@ a partially-async pipeline for no real benefit.
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from haystack.components.embedders import OpenAIDocumentEmbedder, OpenAITextEmbedder
 from haystack.components.generators.chat import OpenAIChatGenerator
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = get_settings()
     openai_api_key = Secret.from_token(settings.openai_api_key)
 
@@ -70,7 +70,7 @@ app = FastAPI(title="What's for Dinner", lifespan=lifespan)
 
 
 @app.exception_handler(RetrievalError)
-async def retrieval_error_handler(_request, exc: RetrievalError) -> JSONResponse:
+async def retrieval_error_handler(_request: Request, exc: RetrievalError) -> JSONResponse:
     logger.error("Retrieval error: %s", exc)
     return JSONResponse(
         status_code=502, content={"detail": "Recipe retrieval is temporarily unavailable."}
@@ -78,7 +78,7 @@ async def retrieval_error_handler(_request, exc: RetrievalError) -> JSONResponse
 
 
 @app.exception_handler(GenerationError)
-async def generation_error_handler(_request, exc: GenerationError) -> JSONResponse:
+async def generation_error_handler(_request: Request, exc: GenerationError) -> JSONResponse:
     logger.error("Generation error: %s", exc)
     return JSONResponse(
         status_code=502, content={"detail": "Recipe recommendation is temporarily unavailable."}
