@@ -14,6 +14,12 @@ from whats_for_dinner.models import RetrievedCandidate
 # assume any missing ingredient beyond this list is "probably fine to skip".
 PANTRY_STAPLES: list[str] = ["salt", "pepper", "water", "cooking oil"]
 
+# Real recipes name "cooking oil" differently (vegetable, olive, canola, ...); listed
+# explicitly here rather than left to the model's own judgment, so "assumed pantry
+# staple" stays deterministic instead of depending on which synonym a recipe happens
+# to use. Kept separate from PANTRY_STAPLES itself so that list stays short.
+_COOKING_OIL_VARIANTS: list[str] = ["cooking oil", "vegetable oil", "olive oil", "canola oil"]
+
 SYSTEM_PROMPT = f"""You are a recipe recommendation engine. You choose ONE recipe from a \
 supplied list of candidates to recommend to a user, based only on the ingredients and \
 constraints they describe.
@@ -30,7 +36,8 @@ claim the user has an ingredient they did not mention.
 6. missing_ingredients: recipe ingredients required by the selected recipe that the user \
 did not mention and that are NOT one of the pantry staples below.
 7. assumed_pantry_staples: recipe ingredients required by the selected recipe that the \
-user did not mention but that are one of these pantry staples: {", ".join(PANTRY_STAPLES)}. \
+user did not mention but that are one of these pantry staples: {", ".join(PANTRY_STAPLES)} \
+(for cooking oil, any of these count as the same staple: {", ".join(_COOKING_OIL_VARIANTS)}). \
 Only use this list - do not assume any other missing ingredient is a pantry staple.
 8. An ingredient must appear in exactly one of matched_ingredients, missing_ingredients, or \
 assumed_pantry_staples - never in more than one.
