@@ -25,28 +25,32 @@ PostgreSQL/pgvector, and GPT-4o.
 
 ## Architecture
 
-**Startup / ingestion** (runs once, at process startup):
+```mermaid
+flowchart TD
+    subgraph ingestion[Startup ingestion]
+        A["data/recipes/*.txt"] --> B[Recipe loader]
+        B --> C["One Haystack Document per recipe"]
+        C --> D[OpenAI document embeddings]
+    end
+    D --> PG[("PostgreSQL / pgvector")]
 
-```
-data/recipes/*.txt -> recipe loader -> one Document per recipe (deterministic ID)
-                                     -> OpenAI document embedder
-                                     -> PostgreSQL/pgvector
+    subgraph request[Request]
+        E["POST /recommend_recipe"] --> F[FastAPI]
+        F --> G[RecommendationService]
+        G --> H[Query embedding]
+        H --> I[pgvector top-k retrieval]
+        I --> J[Prompt builder]
+        J --> K[GPT-4o]
+        K --> L[Structured RecommendationDecision]
+        L --> M[Semantic validation]
+        M --> N["Markdown + DecisionSummary"]
+    end
+    PG -.-> I
 ```
 
-**Request path**:
-
-```
-POST /recommend_recipe
-    -> Pydantic request validation (reject empty/whitespace text)
-    -> RecommendationService
-         -> OpenAI query embedder
-         -> pgvector top-k retrieval (candidates + rank + similarity score)
-         -> prompt builder (rules + pantry-staple policy + candidates)
-         -> GPT-4o, strict JSON-schema structured output
-         -> semantic validation (selected id must be a retrieved candidate)
-    -> structured trace logged (request id, candidates, decision, latency)
-    -> RecommendResponse (Markdown + a decision summary)
-```
+Retrieval is candidate generation, not the final decision - GPT-4o compares the retrieved
+candidates against the user's actual request and produces the structured decision above, which
+is then checked against those same candidates (semantic validation) before being returned.
 
 ### Project layout
 
@@ -58,7 +62,7 @@ src/whats_for_dinner/
   generation.py, service.py          GPT-4o structured output, orchestration + semantic validation
   main.py                            FastAPI app, component wiring, the one thin route
   *_test.py                          colocated pytest tests, one per module
-eval/                                 human-annotated evaluation fixture + runner
+eval/                                 manually annotated evaluation fixture + runner
 ```
 
 `data/recipes/` (the 20 supplied recipes) is what the app actually reads; `data.zip` is the
@@ -244,21 +248,22 @@ mentioned is a genuine `missing_ingredient`.
 - **Sync Haystack calls, async API boundary** - the pinned embedders have no `run_async`, so the
   pipeline is sync internally; the one blocking call per request is offloaded with
   `asyncio.to_thread` rather than forcing a partially-async pipeline.
-- **Human-annotated evaluation set**, not the evaluated model's own output, as ground truth.
+- **Manually annotated evaluation fixture**, not the evaluated model's own output, as ground truth.
 
 ## Limitations
 
 - The 20-recipe corpus is tiny; retrieval quality here doesn't generalize to a larger, noisier
   catalog - see [Evaluation strategy](#evaluation-strategy) for what would need to grow with it.
-- Ingredient matching is exact-string (case-insensitive) inside the LLM's own reasoning - no
-  synonym/ontology layer, so "veggies" vs. "mixed vegetables" is GPT-4o's judgment, not a
-  deterministic matcher.
+- Ingredient interpretation during recommendation is handled by GPT-4o, not a deterministic
+  matcher - there's no ingredient-normalization or ontology layer, so whether "veggies" counts
+  as "mixed vegetables" is the model's judgment call. Evaluation, separately, compares the
+  model's reported ingredient lists against manually annotated labels using case-insensitive
+  set matching - that comparison is deterministic even though the recommendation itself isn't.
 - `missing_ingredients` recall isn't perfect (~0.5-0.6, see Evaluation strategy) - the model
   sometimes under-reports an ingredient it considers minor (e.g. cheese folded into a sauce).
-- **Recipe selection is not fully deterministic** - two evaluation runs against the identical
-  prompt/candidates produced different selection accuracy (1.00 vs. 0.80), including one clearly
-  worse pick over a clearly better available one. A single passing run/manual test is not
-  sufficient evidence of correctness.
+- **Recipe selection is not fully deterministic** - see
+  [Evaluation strategy](#evaluation-strategy) for a concrete example. A single passing run or
+  manual test is not sufficient evidence of correctness.
 - `custom_components.py` (the supplied image-extraction helper) has pre-existing `pyright`
   errors from the challenge's own reference code; unused, unmodified.
 - No auth, rate limiting, or production observability - out of scope for a PoC.
@@ -266,7 +271,7 @@ mentioned is a genuine `missing_ingredient`.
 ## Tests
 
 ```bash
-uv run pytest       # 28 tests, all OpenAI/DB calls replaced with small fakes, <1s
+uv run pytest       # 30 tests, all OpenAI/DB calls replaced with small fakes, <1s
 uv run ruff check .
 uv run pyright
 ```
@@ -276,7 +281,10 @@ Colocated as `<module>_test.py` next to the module they test (`recipes_test.py`,
 CONVENTIONS.md. Coverage: recipe loading/deterministic IDs, ingestion idempotency, structured
 generation parsing + schema request + error mapping, service orchestration + semantic validation
 (hallucinated-id rejection, title canonicalization), and the public API contract including 502s
-that don't leak the underlying exception text.
+that don't leak the underlying exception text. `eval/run_eval_test.py` covers the evaluator's own
+logic the same way - it exercises `validate_selection` (imported from `service.py`, not
+duplicated) with fakes, so evaluation is checked against the identical semantic-validation
+invariant production enforces.
 
 `pyright`'s `typeCheckingMode` is `"basic"`, not `"strict"` - tried deliberately: after fixing
 every legitimate issue strict mode found, 33 errors remained, all either `haystack-ai` having no
@@ -285,9 +293,9 @@ type stubs at all (fires in every file that imports it) or inside the unused
 
 ## Evaluation strategy
 
-Retrieval and generation are evaluated independently, against a small **human-annotated**
-fixture (`eval/dataset.jsonl`, 10 queries) - annotated and reviewed by the same person who built
-the system, not an independent human-annotation study. Never evaluated against the model's own
+Retrieval and generation are evaluated independently, against a small **manually annotated**
+fixture (`eval/dataset.jsonl`, 10 queries) - annotated and reviewed by the developer of this
+project, not an independent multi-annotator study. Never evaluated against the model's own
 output as ground truth. Run it (costs real OpenAI calls, run sparingly):
 
 ```bash
@@ -307,37 +315,32 @@ accuracy, constraint-conflict precision/recall (the actual conflicting items, no
 -> `constraint failure` -> `ingredient-accounting failure` -> `pass` - lets an engineer localize
 *which stage* regressed instead of reading one aggregate score.
 
-### Actual runs (live GPT-4o + the supplied corpus)
-
-Two consecutive runs, same code, same prompt, same 10 queries:
+### Actual run (live GPT-4o + the supplied corpus)
 
 ```
-Run 1:  Recall@5 1.00  Precision@5 0.24  Hit rate@5 1.00  MRR 1.00
-        Selection accuracy 1.00  is_reasonable_match accuracy 1.00
-        Matched P/R 0.90/0.90   Missing P/R 0.52/0.57
-
-Run 2:  Recall@5 1.00  Precision@5 0.24  Hit rate@5 1.00  MRR 1.00
-        Selection accuracy 0.80  is_reasonable_match accuracy 1.00
-        Matched P/R 0.97/0.92   Missing P/R 0.50/0.62
+Recall@5 1.00  Precision@5 0.24  Hit rate@5 1.00  MRR 1.00
+Selection accuracy 1.00  is_reasonable_match accuracy 1.00
+Constraint conflicts P/R 0.90/0.90   Matched P/R 0.92/0.92   Missing P/R 0.62/0.67
 ```
 
-Retrieval performed perfectly on this fixture and was stable across both runs. Given the small,
-well-separated 20-recipe corpus and limited (10-query) evaluation set, this is not evidence of
-production-scale retrieval quality - it does show the failure below is generation's, not
-retrieval's, since retrieval handed generation the same correct candidates both times.
+Retrieval was perfect on this fixture (expected - 20 well-separated recipes, top_k=5; not
+evidence of production-scale quality given the corpus/fixture size). 8 of 10 queries passed
+outright. The one constraint-conflict "failure" is a useful finding about the *metric*, not the
+system: for the no-cheese Caprese Chicken query, GPT-4o correctly rejected the recipe
+(`is_reasonable_match: false`) but phrased the conflict as `"contains cheese"` rather than the
+annotated `"cheese"` - exact-set string matching scores that as wrong even though the underlying
+decision was right. The other two failures are the already-known `missing_ingredients` recall
+weakness (the model under-reporting an ingredient it considers minor).
 
-Generation was not stable: selection accuracy moved from 1.00 to 0.80 with nothing changed on
-our end. Run 2's regression is a genuinely bad pick, not an annotation disagreement - for *"I
-have chicken breasts and tomatoes, but no cheese please,"* it selected **Stuffed Bell Peppers**
-(no chicken at all - it uses ground beef - and does contain cheese, the excluded ingredient)
-over the clearly better **Caprese Chicken**, present in the retrieved candidates both times.
-
-This is the main finding: **GPT-4o's recipe selection is not fully deterministic**, so a single
-passing run (or one saved `results.json`) is not sufficient evidence of quality, and
-stage-separated evaluation is what made it possible to localize this to generation rather than
-retrieval. Missing-ingredient recall (~0.5-0.6 both runs) is the other consistent weakness. A
-production version would need a lower-temperature/more constrained generation setup, a larger
-eval set run multiple times per change, or both.
+**Historical finding, kept because it's hard to reproduce on demand:** an earlier pair of
+consecutive runs (before the constraint-conflict precision/recall metric above existed) showed
+GPT-4o's *recipe selection itself* changing between identical runs - selection accuracy moved
+from 1.00 to 0.80, including one run where **Stuffed Bell Peppers** (no chicken, contains the
+excluded cheese) was picked over the clearly better **Caprese Chicken** for that same query. That
+remains the core limitation this evaluation setup exists to catch: **GPT-4o's output is not fully
+deterministic**, a single run (this one included) is not sufficient evidence of quality, and a
+larger fixture run multiple times per change would be needed before trusting a metric movement as
+real.
 
 ## Image input (bonus, not implemented)
 
@@ -355,7 +358,7 @@ field; the route would run vision extraction first when present.
   the corpus is large enough to need it - at that scale, startup ingestion also becomes a
   dedicated indexing job, and `filter_documents()`'s full-store fetch (fine at 20 rows) would
   need to become a targeted lookup instead.
-- Grow the human-annotated evaluation set alongside prompt/model changes, and re-run it as a
+- Grow the manually annotated evaluation set alongside prompt/model changes, and re-run it as a
   regression check.
-- LLM-as-judge as a secondary, scalable signal for Markdown quality - kept secondary to human
+- LLM-as-judge as a secondary, scalable signal for Markdown quality - kept secondary to manual
   annotation, per PIPELINE.md.
