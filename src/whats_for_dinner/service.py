@@ -24,7 +24,7 @@ from whats_for_dinner.retrieval import CandidateRetriever, TextEmbedder, retriev
 logger = logging.getLogger(__name__)
 
 
-def _validate_selection(
+def validate_selection(
     candidates: list[RetrievedCandidate], decision: RecommendationDecision
 ) -> RecommendationDecision:
     """Reject a decision that points at a recipe retrieval never supplied.
@@ -36,6 +36,10 @@ def _validate_selection(
     copy of it, also makes a valid-id/wrong-title reply behave
     deterministically instead of silently displaying whatever text GPT-4o
     happened to write.
+
+    Public (no leading underscore) because eval/run_eval.py reuses this exact
+    function, so evaluation exercises the same semantic-validation invariant
+    production does rather than a second, possibly-drifting copy of it.
     """
     candidates_by_id = {candidate.recipe_id: candidate for candidate in candidates}
     matched_candidate = candidates_by_id.get(decision.selected_recipe_id)
@@ -84,7 +88,7 @@ class RecommendationService:
         try:
             candidates = retrieve_candidates(self._text_embedder, self._retriever, request_text)
             messages = build_recommendation_messages(request_text, candidates)
-            decision = _validate_selection(
+            decision = validate_selection(
                 candidates, generate_recommendation(self._chat_generator, messages)
             )
         except Exception as exc:

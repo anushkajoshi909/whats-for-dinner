@@ -25,11 +25,13 @@ from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
 from pydantic import BaseModel
 
 from whats_for_dinner.config import get_settings
-from whats_for_dinner.generation import generate_recommendation
+from whats_for_dinner.errors import GenerationError
+from whats_for_dinner.generation import ChatGenerator, generate_recommendation
 from whats_for_dinner.models import RecommendationDecision, RetrievedCandidate
 from whats_for_dinner.prompts import build_recommendation_messages
 from whats_for_dinner.recipes import load_recipes
-from whats_for_dinner.retrieval import retrieve_candidates
+from whats_for_dinner.retrieval import CandidateRetriever, TextEmbedder, retrieve_candidates
+from whats_for_dinner.service import validate_selection
 
 _DATASET_PATH = Path(__file__).parent / "dataset.jsonl"
 _RESULTS_PATH = Path(__file__).parent / "results.json"
@@ -53,7 +55,7 @@ class QueryResult:
         self,
         record: EvalRecord,
         candidates: list[RetrievedCandidate],
-        decision: RecommendationDecision,
+        decision: RecommendationDecision | None,
         failure_stage: str,
     ) -> None:
         self.record = record
@@ -90,8 +92,8 @@ class QueryReportEntry(BaseModel):
     so a regression can be traced back to the specific query that caused it."""
 
     query: str
-    selected_recipe_title: str
-    is_reasonable_match: bool
+    selected_recipe_title: str | None
+    is_reasonable_match: bool | None
     failure_stage: str
 
 
@@ -160,14 +162,25 @@ def _classify_failure(
 
 def _evaluate_one(
     record: EvalRecord,
-    text_embedder: OpenAITextEmbedder,
-    retriever: PgvectorEmbeddingRetriever,
-    chat_generator: OpenAIChatGenerator,
+    text_embedder: TextEmbedder,
+    retriever: CandidateRetriever,
+    chat_generator: ChatGenerator,
     id_map: dict[str, str],
 ) -> QueryResult:
     candidates = retrieve_candidates(text_embedder, retriever, record.query)
     messages = build_recommendation_messages(record.query, candidates)
-    decision = generate_recommendation(chat_generator, messages)
+
+    try:
+        raw_decision = generate_recommendation(chat_generator, messages)
+        decision = validate_selection(candidates, raw_decision)
+    except GenerationError:
+        # Same semantic-validation rule production applies (a hallucinated
+        # selected_recipe_id): report it as a selection failure rather than
+        # crashing the whole evaluation run over one bad reply, so a single
+        # malformed response doesn't make the rest of the report unusable.
+        return QueryResult(
+            record=record, candidates=candidates, decision=None, failure_stage="selection failure"
+        )
 
     candidate_doc_ids = [c.recipe_id for c in candidates]
     preferred_doc_id = id_map[record.preferred_recipe_id] if record.preferred_recipe_id else None
@@ -221,6 +234,13 @@ def _compute_generation_metrics(
 
     for result in results:
         record, decision = result.record, result.decision
+        if decision is None:
+            # Semantic validation rejected the selection (hallucinated id) - always
+            # a wrong selection, but there's no decision left to compare the other
+            # metrics against, so only selection_accuracy is affected by this row.
+            selection_correct.append(0.0)
+            continue
+
         preferred_doc_id = (
             id_map[record.preferred_recipe_id] if record.preferred_recipe_id else None
         )
@@ -266,8 +286,12 @@ def _build_report(results: list[QueryResult], id_map: dict[str, str], top_k: int
         results=[
             QueryReportEntry(
                 query=result.record.query,
-                selected_recipe_title=result.decision.selected_recipe_title,
-                is_reasonable_match=result.decision.is_reasonable_match,
+                selected_recipe_title=(
+                    result.decision.selected_recipe_title if result.decision else None
+                ),
+                is_reasonable_match=(
+                    result.decision.is_reasonable_match if result.decision else None
+                ),
                 failure_stage=result.failure_stage,
             )
             for result in results
@@ -295,7 +319,8 @@ def _print_report(report: EvalReport) -> None:
 
     print("\n--- Per-query result ---")
     for entry in report.results:
-        print(f"[{entry.failure_stage:<28}] {entry.query!r} -> {entry.selected_recipe_title!r}")
+        title = entry.selected_recipe_title or "(rejected - hallucinated recipe id)"
+        print(f"[{entry.failure_stage:<28}] {entry.query!r} -> {title!r}")
 
 
 def main() -> None:
