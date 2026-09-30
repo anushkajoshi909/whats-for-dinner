@@ -3,6 +3,7 @@ import io
 
 import openai
 from haystack import component
+from openai.types.chat import ChatCompletionUserMessageParam
 from PIL import Image
 
 
@@ -14,12 +15,12 @@ class ExtractFoodItemsFromImage:
     def run(
         self,
         image_path: str,
-    ) -> str:
+    ) -> dict[str, str]:
         model = "gpt-4o"
 
         image_base64 = self.image_to_base64(image_path)
 
-        messages = [
+        messages: list[ChatCompletionUserMessageParam] = [
             {
                 "role": "user",
                 "content": [
@@ -39,6 +40,8 @@ class ExtractFoodItemsFromImage:
 
         response = client.chat.completions.create(model=model, messages=messages, stream=False)
         content = response.choices[0].message.content
+        if content is None:
+            raise ValueError("GPT-4o returned no ingredient description.")
 
         return {
             "answer": content,
@@ -65,6 +68,5 @@ class ExtractFoodItemsFromImage:
 
                 # Encode to base64
                 return base64.b64encode(byte_arr).decode("utf-8")
-        except Exception as e:
-            print(f"Error processing image: {e}")
-            return None
+        except OSError as exc:
+            raise ValueError("Could not read or convert the ingredient image.") from exc
