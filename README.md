@@ -233,8 +233,9 @@ strict mode was evaluated rather than made green through broad suppressions.
 
 ## Evaluation strategy
 
-A manually annotated 10-query fixture evaluates retrieval and recommendation separately, never
-against the model's own output as ground truth.
+A manually annotated 24-query fixture evaluates retrieval and recommendation separately, never
+against the model's own output as ground truth. Two queries have no preferred/relevant recipe;
+they are excluded from retrieval metrics.
 
 | Stage | Metrics |
 |---|---|
@@ -249,25 +250,31 @@ uv run python eval/run_eval.py
 Current real results:
 
 ```text
-Retrieval    Recall@5 1.00 | Precision@5 0.24 | Hit@5 1.00 | MRR 1.00
-Selection    Accuracy 1.00 | Reasonable-match 1.00
-Constraints  P/R 0.90/0.90
-Matched      P/R 0.92/0.92
-Missing      P/R 0.62/0.67
+Retrieval    Recall@5 1.00 | Precision@5 0.26 | Hit@5 1.00 | MRR 1.00
+Selection    Accuracy 1.00 | Reasonable-match 0.88
+Constraints  P/R 0.88/0.92
+Matched      P/R 0.82/0.80
+Missing      P/R 0.80/0.93
 ```
 
 **Key findings:**
 
-- Expected recipe was retrieved for every query in this small fixture.
-- 8/10 queries passed all current checks.
-- Missing-ingredient recall remains the weakest measured behavior.
-- `"cheese"` vs `"contains cheese"` exposes a limitation of exact-set evaluation rather than a
-  recommendation failure.
-- Earlier repeated runs showed selection accuracy varying from 1.00 to 0.80, demonstrating
-  GPT-4o nondeterminism and why retrieval and generation are evaluated separately.
+- Every annotated relevant recipe was retrieved, with the first relevant result at rank 1; the
+  modest Precision@5 reflects retrieving five candidates when each positive query has few
+  relevant recipes.
+- 17/24 queries passed the per-query classifier: 1 ingredient-accounting failure, 3
+  reasonable-match disagreements, and 3 constraint failures.
+- Selection accuracy is 1.00 because the preferred recipe was selected on every query with a
+  preferred recipe. The three per-query "selection failure" labels are caused by disagreement
+  on `is_reasonable_match`, which the classifier checks before comparing the selected recipe.
+- Missing-ingredient recall is strong (0.93), while precision (0.80) indicates some reported
+  missing ingredients are not in the annotation.
+- The fixture's expected reasonable-match labels should be reviewed for cases where the user
+  explicitly lacks a core ingredient, such as mushrooms or baking powder.
 
-These results cover 10 queries against 20 recipes and are not evidence of production-scale
-retrieval quality.
+These results cover 24 queries against 20 recipes and are not evidence of production-scale
+retrieval quality. GPT-4o output can vary between runs, so treat the figures as a snapshot rather
+than a deterministic regression baseline.
 
 ## Image input (bonus, not implemented)
 
